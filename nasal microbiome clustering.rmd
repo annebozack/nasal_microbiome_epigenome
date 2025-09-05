@@ -1,0 +1,151 @@
+---
+title: "Project Viva nasal microbiome clustering"
+author: 
+  - name: "Anne Bozack"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+## Libraries
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+library(phyloseq)
+library(cluster)
+library(ggplot2)
+library(fpc)
+library(ggsci)
+library(GGally)
+```
+
+
+## Load data
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# microbiome data
+# phyloseq objects: 
+# (1) microbiome data before glom for combining OTUs, after removing OTUs with <10 reads in individual samples (ps4_noncontam_10k_ge10reads); 
+# (2) microbiome data with rarefaction (ps4_rare_mean);
+# (3) microbiome data with cluster assignment (ps4_rare_mean_glom)
+load('microbiome data.rdata')
+```
+
+## Using merged OTUs
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# Merging OTUs with same taxa at genus level
+ps4_rare_mean_glom = tax_glom(ps4_rare_mean, 'genus', NArm = FALSE)
+dim(get_sample(ps4_rare_mean_glom))                                                                                                                                                                                                                                                                                               
+# 322 416   322 OTUs
+
+# Jaccard distance
+jaccard_glom = phyloseq::distance(ps4_rare_mean_glom, method = "jaccard", binary = TRUE)
+head(jaccard_glom)
+# 0.7608696 0.5111111 0.6896552 0.8571429 0.7857143 0.7213115
+
+# Jensen-Shannon divergence 
+jsd_glom = phyloseq::distance(ps4_rare_mean_glom, method = "jsd")
+head(jsd_glom)
+# 0.43607961 0.24554501 0.37752904 0.08929562 0.51503106 0.49323969
+
+# Jensen-Shannon distance 
+jsd_distance_glom = sqrt(jsd_glom)
+head(jsd_distance_glom)
+# 0.6603632 0.4955250 0.6144339 0.2988237 0.7176566 0.7023103
+
+# Bray-Curtis divergence 
+bray_glom = phyloseq::distance(ps4_rare_mean_glom, method = "bray")
+head(bray_glom)
+#  0.8364576 0.5751833 0.7239324 0.2951559 0.9033714 0.8738217
+```
+
+### Evaluate number of clusters
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# value is a measure of how similar an object is to its own cluster (cohesion) compared to other clusters (separation) 
+# ranges from −1 to +1, where a high value indicates that the object is well matched to its own cluster and poorly matched to neighboring clusters
+pam_jaccard_glom = sapply(2:10, function(i) pam(jaccard_glom, k=i))
+pam_jsd_glom = sapply(2:10, function(i) pam(jsd_glom, k=i))
+pam_jsd_distance_glom = sapply(2:10, function(i) pam(jsd_distance_glom, k=i))
+pam_bray_glom = sapply(2:10, function(i) pam(bray_glom, k=i))
+
+si_jaccard_glom = apply(pam_jaccard_glom, 2, function(i) mean(silhouette(i, jaccard_glom)[,3]))
+names(si_jaccard_glom) = c(2:10)
+names(si_jaccard_glom[si_jaccard_glom == max(si_jaccard_glom)])
+# best k = 2
+si_jsd_glom = apply(pam_jsd_glom, 2, function(i) mean(silhouette(i, jsd_glom)[,3]))
+names(si_jsd_glom) = c(2:10)
+names(si_jsd_glom[si_jsd_glom == max(si_jsd_glom)])
+# best k = 6
+si_jsd_distance_glom = apply(pam_jsd_distance_glom, 2, function(i) mean(silhouette(i, jsd_distance_glom)[,3]))
+names(si_jsd_distance_glom) = c(2:10)
+names(si_jsd_distance_glom[si_jsd_distance_glom == max(si_jsd_distance_glom)])
+# best k = 7
+si_bray_glom = apply(pam_bray_glom, 2, function(i) mean(silhouette(i, bray_glom)[,3]))
+names(si_bray_glom) = c(2:10)
+names(si_bray_glom[si_bray_glom == max(si_bray_glom)])
+# best k = 9
+
+# dataframes to plot
+# plot silhouette index
+si_df = data.frame(SI = c(si_jaccard_glom, si_jsd_glom, si_jsd_distance_glom, si_bray_glom),
+  n_clust = rep(c(2:10), times = 4), 
+  distance = rep(c('Jaccard', 'JSD', 'JS distance', 'Bray'), each = 9))
+si_df$distance = as.factor(si_df$distance)
+
+# CH plot
+ch_jaccard_glom = apply(pam_jaccard_glom, 2, function(i) cluster.stats(jaccard_glom, i$clustering)$ch)
+ch_jsd_glom = apply(pam_jsd_glom, 2, function(i) cluster.stats(jsd_glom, i$clustering)$ch)
+ch_jsd_distance_glom = apply(pam_jsd_distance_glom, 2, function(i) cluster.stats(jsd_distance_glom, i$clustering)$ch)
+ch_bray_glom = apply(pam_bray_glom, 2, function(i) cluster.stats(bray_glom, i$clustering)$ch)
+ch_df = data.frame(CH = c(ch_jaccard_glom, ch_jsd_glom, ch_jsd_distance_glom, ch_bray_glom),
+  n_clust = rep(c(2:10), times = 4), 
+  distance = rep(c('Jaccard', 'JSD', 'JS distance', 'Bray'), each = 9))
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggplot(si_df, aes(n_clust, SI, group = distance, color = distance)) + geom_point(alpha = 0.8) + geom_line(alpha = 0.8) + theme_minimal() + scale_color_locuszoom() + ylim(0,1) + 
+  geom_hline(yintercept = 0.75, color = 'darkgray') + geom_hline(yintercept = 0.5, color = 'darkgray') + geom_hline(yintercept = 0.25, color = 'darkgray') + 
+  annotate('text', x = 3.5, y = 0.23, label = "Weak and could be artificial", color = 'darkgray', size = 3) +
+  annotate('text', x = 3, y = 0.48, label = "Moderate support", color = 'darkgray', size = 3) + 
+  annotate('text', x = 3, y = 0.73, label = "Strong support", color = 'darkgray', size = 3)
+
+ggplot(ch_df, aes(n_clust, CH, group = distance, color = distance)) + geom_point(alpha = 0.8) + geom_line(alpha = 0.8) + theme_minimal() + scale_color_locuszoom() 
+```
+
+### PAM using JSD with k = 6
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+pam_jsd_glom_k6 <- pam(jsd_glom, 6)
+pam_jsd_glom_k6$clusinfo
+#      size  max_diss    av_diss  diameter  separation
+# [1,]   87 0.4261830 0.07516899 0.5362387 0.007731205
+# [2,]   36 0.2569665 0.11751048 0.4439168 0.031899965
+# [3,]   89 0.2456721 0.09509949 0.3571885 0.007164349
+# [4,]  141 0.2335632 0.08332987 0.3976630 0.007164349
+# [5,]   45 0.6381341 0.22165521 0.6887681 0.036175763
+# [6,]   18 0.2234031 0.08520174 0.3257958 0.072032444
+
+jsd_clusters_glom = pam_jsd_glom_k6$silinfo$widths
+jsd_clusters_glom = data.frame(jsd_clusters_glom)
+jsd_clusters_glom$Sample_ID = rownames(jsd_clusters_glom)
+
+# combine with sample data
+# align 
+jsd_clusters_glom = jsd_clusters_glom[sample_data(ps4_rare_mean_glom)$Sample_ID,]
+
+all(sample_data(ps4_rare_mean_glom)$Sample_ID == jsd_clusters_glom$Sample_ID)
+# TRUE
+identical(sample_data(ps4_rare_mean_glom)$Sample_ID, jsd_clusters_glom$Sample_ID)
+# TRUE
+
+sample_data(ps4_rare_mean_glom)$cluster_jsd_glom_k6 = jsd_clusters_glom$cluster
+sample_data(ps4_rare_mean_glom)$cluster_jsd_glom_k6 = as.factor(sample_data(ps4_rare_mean_glom)$cluster_jsd_glom_k6)
+
+# save physeq object
+save(ps4_rare_mean_glom, file = "ps4_rare_mean_glom.rdata")
+
+# ordination plot by cluster
+MDS = ordinate(ps4_rare_mean_glom, "PCoA", distance=jsd_glom)
+
+
+```{r, out.width = '100%', echo = FALSE}
+ggpairs(data.frame(MDS$vectors)[,c(1:5)], aes(color = sample_data(ps4_rare_mean_glom)$cluster_jsd_glom_k6, alpha = 0.8), upper = "blank", axisLabels = "internal") + theme_minimal() + scale_color_locuszoom() + theme(legend.position = "bottom")
+```

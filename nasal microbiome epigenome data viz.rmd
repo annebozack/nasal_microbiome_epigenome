@@ -1,0 +1,791 @@
+---
+title: "Project Viva nasal microbiome and epigenome: data visualization"
+author: 
+  - name: "Anne Bozack"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+## Libraries
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+library(phyloseq)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(UpSetR)
+library(ENmix)
+library(bacon)
+library(scale_break)
+# devtools::install_github("annebozack/EWASplot")
+library(EWASplot)
+library(ggtext)
+library(ggrepel)
+library(dplyr)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(tidyr)
+library(tidyquant)
+library(ggdist)
+library(ggbreak)
+library(GGally)
+```
+
+## Load data
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# microbiome data
+# phyloseq objects: 
+# (1) microbiome data before glom for combining OTUs, after removing OTUs with <10 reads in individual samples (ps4_noncontam_10k_ge10reads); 
+# (2) microbiome data with rarefaction (ps4_rare_mean);
+# (3) microbiome data with cluster assignment (ps4_rare_mean_glom)
+load('microbiome data.rdata')
+
+# DNAm and phenotype data:
+# (1) Mvalues (mvals.ComBat)
+# (2) phenotype file including microbiome cluster assignments and covariates (samp_bmiEdu)
+load('mvals_sampInfo_microbiomeEWAS_completeCovars.rdata')
+
+# Results of EWAS of microbiome clusters:
+# (1) model fit and output (fit2)
+# (2) Bonferroni-significnat pairwise comparisons (results_globalBonf)
+# (3) Bonferroni-significnat pairwise comparisons (results_globalFDR)
+load('EWAS_global_Bonf_FDR_results.rdata')
+
+# Results of pathway analysis:
+# Gene Ontology results (go_all)
+load('go_all.rdata')
+
+# Results of differential abundance analysis (ANCOM-BC) with differentially methylated positions
+df_ancom_all = read.csv('df_ancom_all_prv_cut15.csv')[,-1]
+
+# Results of differential abundance analysis (ANCOM-BC) with epigenetic age
+df_ancom_all_EA = read.csv('Horvath_results.csv')[,-1]
+
+# annotation file
+anno = getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+anno = data.frame(anno)
+```
+
+## Plotting relative abundance: Figure 2
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+samp_all = get_variable(ps4_rare_mean_glom)
+dim(samp_all)
+# 416  13
+
+# Calculate relative abundance
+ps4_rare_mean_glom_rabun = transform_sample_counts(ps4_rare_mean_glom, function(x) x/sum(x))
+
+# plotting top 15 genera overall
+# dataframe with flag of top 15
+top = data.frame(med_rabun = apply(get_sample(ps4_rare_mean_glom_rabun), 1, median), top15 = NA)
+top = top[order(top$med_rabun, decreasing = T),]
+top$top15[c(1:15)] = 1
+top$top15[is.na(top$top15)] = 0
+
+# make phyloseq object with aggregated genus that aren't in top 15
+ps_top = merge_taxa(ps4_rare_mean_glom_rabun, rownames(top)[top$top15 == 0])
+
+# keep only samples with DNAm data
+samp_filter = ifelse(samp_all$Sample_ID %in% samp_bmiEdu$Sample_ID, TRUE, FALSE)
+table(samp_filter)
+#   FALSE  TRUE 
+#   44     372
+ps_top <- prune_samples(samp_filter, ps_top)
+dim(get_sample(ps_top))
+# 16 372
+
+table(get_variable(ps_top)$cluster_jsd_glom_k6)
+#   1   2   3   4   5   6 
+#  83  33  79 120  41  16 
+
+# data frame to plot
+df_top = psmelt(ps_top)
+# reorder clusers
+table(df_top$cluster_jsd_glom_k6)
+#    1    2    3    4    5    6 
+# 1328  528 1264 1920  656  256 
+df_top$clust[df_top$cluster_jsd_glom_k6 == 4] = 1
+df_top$clust[df_top$cluster_jsd_glom_k6 == 1] = 2
+df_top$clust[df_top$cluster_jsd_glom_k6 == 3] = 3
+df_top$clust[df_top$cluster_jsd_glom_k6 == 5] = 4
+df_top$clust[df_top$cluster_jsd_glom_k6 == 2] = 5
+df_top$clust[df_top$cluster_jsd_glom_k6 == 6] = 6
+table(df_top$clust)
+#    1    2    3    4    5    6 
+# 1920 1328 1264  656  528  256 
+df_top$genus[df_top$OTU == 'OTU_13'] = 'Other'
+df_top = data.frame(df_top %>% group_by(clust, genus) %>% summarise(medAbundance = median(Abundance)))
+# df_top$cluster_jsd_glom_k6 = factor(df_top$cluster_jsd_glom_k6, levels = c('4', '1', '3', '5', '2', '6'))
+df_top$genus[df_top$genus == 'unclassified_Actinomycetales'] = 'Unclassified Actinomycetales'
+df_top$genus[df_top$genus == 'unclassified_Alphaproteobacteria'] = 'Unclassified Alphaproteobacteria'
+df_top$genus[df_top$genus == 'unclassified_Neisseriaceae'] = 'Unclassified Neisseriaceae'
+df_top$genus = factor(df_top$genus, levels = c('Corynebacterium', 'Propionibacterium', 'Unclassified Actinomycetales', 
+  'Porphyromonas', 
+  'Anaerococcus', 'Dolosigranulum', 'Gemella', 'Staphylococcus', 'Streptococcus', 'Veillonella',  
+  'Moraxella', 'Neisseria', 'Pseudomonas', 'Unclassified Alphaproteobacteria', 'Unclassified Neisseriaceae', 'Other'))
+colnames(df_top)[2] = 'Genus'
+df_top$clust = factor(df_top$clust)
+
+cols = c('#E98300', '#FEC51D', '#C74632', '#8C1515',  '#175E54', '#6FA287', '#4298B5', '#007C92', '#279989', '#8F993E', '#651C32', '#620059', '#5D4B3C', '#766253', '#734675', 'gray')
+
+abunGenus = ggplot(df_top, aes(x = clust, y = medAbundance, fill = Genus)) + geom_bar(stat = 'identity', width = 0.8, color = 'black', linewidth = 0.2) + theme_classic() + 
+ scale_x_discrete(labels=c("1" = "1 \n N = 120", "2" = "2 \n N = 83", "3" = "3 \n N = 79", "4" = "4 \n N = 41", "5" = "5 \n N = 33", "6" = "6 \n N = 16")) +
+  labs(x = 'Cluster', y = 'Median relative abundance', title = 'Top 15 genera') + 
+  scale_fill_manual(values = cols) +
+  guides(shape = guide_legend(override.aes = list(size = 0.5))) + theme(legend.text = element_text(size = 8)) + theme(legend.key.size = unit(0.5, "cm")) + 
+  theme(legend.position = 'bottom') + theme(legend.title=element_blank()) + theme(plot.title = element_text(hjust = 0.5))
+abunGenus = abunGenus + theme(plot.margin = unit(c(5.5,5.5,20,5.5), 'points'))
+
+df_top_genus = df_top
+
+# plotting top phylum
+# agglomerate at taxa level
+ps_phylum = tax_glom(ps4_rare_mean_glom, 'phylum')
+dim(get_sample(ps_phylum))
+# 19 416
+
+# calculate relative abundance
+ps_phylum_rabun = transform_sample_counts(ps_phylum, function(x) x/sum(x))
+
+# dataframe with flag of top 15
+top = data.frame(med_rabun = apply(get_sample(ps_phylum_rabun), 1, median), top4 = NA)
+top = top[order(top$med_rabun, decreasing = T),]
+top$top4[c(1:4)] = 1
+top$top4[is.na(top$top4)] = 0
+
+# make phyloseq object with aggregated genus that aren't in top 15
+ps_top = merge_taxa(ps_phylum_rabun, rownames(top)[top$top4 == 0])
+
+# keep only samples with DNAm data
+ps_keep <- prune_samples(samp_filter, ps_top)
+
+dim(get_sample(ps_keep))
+# 5 372
+
+# data frame to plot
+ps_keep = psmelt(ps_keep)
+ps_keep$phylum[ps_keep$OTU == 'OTU_57'] = 'Other'
+df_top = data.frame(ps_keep %>% group_by(cluster_jsd_glom_k6, phylum) %>% summarise(medAbundance = median(Abundance)))
+# df_top$cluster_jsd_glom_k6 = factor(df_top$cluster_jsd_glom_k6, levels = c('4', '1', '3', '5', '2', '6'))
+# reorder clusers
+df_top$clust[df_top$cluster_jsd_glom_k6 == 4] = 1
+df_top$clust[df_top$cluster_jsd_glom_k6 == 1] = 2
+df_top$clust[df_top$cluster_jsd_glom_k6 == 3] = 3
+df_top$clust[df_top$cluster_jsd_glom_k6 == 5] = 4
+df_top$clust[df_top$cluster_jsd_glom_k6 == 2] = 5
+df_top$clust[df_top$cluster_jsd_glom_k6 == 6] = 6
+
+colnames(df_top)[2] = 'Phylum'
+df_top$Phylum = factor(df_top$Phylum, levels = c('Actinobacteria', 'Bacteroidetes', 'Firmicutes', 'Proteobacteria', 'Other'))
+df_top$clust = factor(df_top$clust)
+abunPhylum = ggplot(df_top, aes(x = clust, y = medAbundance, fill = Phylum)) + geom_bar(stat = 'identity', width = 0.8, color = 'black', linewidth = 0.2) + theme_classic() + 
+  labs(x = 'Cluster', y = 'Median relative abundance', title = 'Phyla') + scale_fill_manual(values = c('#f3a40e', '#8C1515', '#3f8b7c', '#68364f', 'gray')) +
+  guides(shape = guide_legend(override.aes = list(size = 0.5))) + theme(legend.text = element_text(size = 8)) + theme(legend.key.size = unit(0.5, "cm")) +
+  theme(legend.position = 'bottom') + theme(legend.title=element_blank()) + 
+  scale_x_discrete(labels=c("1" = "1 \n N = 120", "2" = "2 \n N = 83", "3" = "3 \n N = 79", "4" = "4 \n N = 41", "5" = "5 \n N = 33", "6" = "6 \n N = 16")) + theme(plot.title = element_text(hjust = 0.5)) 
+
+df_top_phylum = df_top
+```
+
+```{r, out.width = '75%', echo = FALSE}
+grid.arrange(abunGenus, abunPhylum, nrow = 2, top=textGrob("Median relative abundance", gp=gpar(fontsize=15)), heights = c(1.24, 1))
+```
+
+
+#### Plotting number of significant results: Figure 3
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+sig = data.frame(matrix(nrow = 16, ncol = 3))
+colnames(sig) = c('clust1', 'clust2', 'n')
+sig$clust1 = c(rep('Cluster 1', times = 5), rep('Cluster 2', times = 4), rep('Cluster 3', times = 3), rep('Cluster 4', times = 2), 'Cluster 5', 'Cluster 6')
+sig$clust2 = c('Cluster 2', 'Cluster 3', 'Cluster 4', 'Cluster 5', 'Cluster 6', 'Cluster 3', 'Cluster 4', 'Cluster 5', 'Cluster 6', 'Cluster 4', 'Cluster 5', 'Cluster 6', 'Cluster 5', 'Cluster 6', 'Cluster 6', 'Cluster 1')
+
+summ = summary(results_globalBonf)
+
+for (i in 1:(nrow(sig) - 1)){
+  sig[i,3] = summ[,i][1] + summ[,i][3]
+}
+
+sig$alpha = ifelse(sig$n == 0, 0, 1)
+sig$alpha[16] = 0
+
+sig$lab = as.character(sig$n)
+
+diag = data.frame(matrix(nrow = 6, ncol = 4))
+colnames(diag) = c('clust1', 'clust2', 'n', 'alpha')
+diag$clust1 = c('Cluster 1', 'Cluster 2', 'Cluster 3', 'Cluster 4', 'Cluster 5', 'Cluster 6')
+diag$clust2 = c('Cluster 1', 'Cluster 2', 'Cluster 3', 'Cluster 4', 'Cluster 5', 'Cluster 6')
+diag$alpha = 0
+diag$lab = c('Cluster 1', 'Cluster 2', 'Cluster 3', 'Cluster 4', 'Cluster 5', 'Cluster 6')
+
+sig = rbind(sig, diag)
+
+sig_heatmap = ggplot(sig, aes(clust1, clust2)) + geom_tile(aes(fill = n), alpha = sig$alpha) + theme_bw() + 
+  scale_fill_gradient(low = 'white', high = cols[1]) +
+  theme(panel.grid = element_blank(), panel.border = element_blank()) + annotate('text', x = sig$clust1, y = sig$clust2, label = sig$lab) + 
+  theme(legend.position = 'none') + coord_flip() + 
+  scale_x_discrete(expand = c(0.1, 0.1)) + scale_y_discrete(expand = c(0.1, 0.1)) +
+  geom_segment(x = 1.5, xend = 1.5, y = 1.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 1.5, xend = 0.5, y = 1.5, yend = 1.5, linewidth = 0.2) +
+  geom_segment(x = 2.5, xend = 2.5, y = 2.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 2.5, xend = 0.5, y = 2.5, yend = 2.5, linewidth = 0.2) +
+  geom_segment(x = 3.5, xend = 3.5, y = 3.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 3.5, xend = 0.5, y = 3.5, yend = 3.5, linewidth = 0.2) +
+  geom_segment(x = 4.5, xend = 4.5, y = 4.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 4.5, xend = 0.5, y = 4.5, yend = 4.5, linewidth = 0.2) +
+  geom_segment(x = 5.5, xend = 5.5, y = 5.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 5.5, xend = 0.5, y = 5.5, yend = 5.5, linewidth = 0.2) +
+  geom_segment(x = 0.5, xend = 0.5, y = 1.5, yend = 6.5, linewidth = 0.2) + geom_segment(x = 0.5, xend = 5.5, y = 6.5, yend = 6.5, linewidth = 0.2) +
+  theme(axis.title = element_blank(), axis.text = element_blank(), axis.ticks = element_blank()) + theme(text = element_text(size = 1))
+
+# Upset plot
+listInput <- list(rownames(results_globalBonf)[results_globalBonf[,1] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,4] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,5] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,6] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,7] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,8] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,9] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,11] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,12] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,14] != 0], 
+    rownames(results_globalBonf)[results_globalBonf[,15] != 0])
+
+names(listInput) = c('Custer 1 vs. 2', 'Custer 1 vs. 5', 'Custer 1 vs. 6',
+    'Custer 2 vs. 3', 'Custer 2 vs. 4', 'Custer 2 vs. 5', 'Custer 2 vs. 6',
+    'Custer 3 vs. 5', 'Custer 3 vs. 6',
+    'Custer 4 vs. 6',
+    'Custer 5 vs. 6')
+
+sig_upset = upset(fromList(listInput), order.by = "freq")
+```
+
+
+```{r, out.width = '50%', echo = FALSE}
+sig_heatmap
+```
+
+```{r, out.width = '50%', echo = FALSE}
+sig_upset
+```
+
+
+##### Plotting GO results: Figure 5
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# get top 20 for each term
+i = 20
+go_1v2_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust1 - clust2',]
+go_1v2_bp = go_1v2_bp[order(go_1v2_bp$P.DE),][c(1:i),]
+go_1v3_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust1 - clust3',]
+go_1v3_bp = go_1v3_bp[order(go_1v3_bp$P.DE),][c(1:i),]
+go_1v4_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust1 - clust4',]
+go_1v4_bp = go_1v4_bp[order(go_1v4_bp$P.DE),][c(1:i),]
+go_1v5_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust1 - clust5',]
+go_1v5_bp = go_1v5_bp[order(go_1v5_bp$P.DE),][c(1:i),]
+go_1v6_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust1 - clust6',]
+go_1v6_bp = go_1v6_bp[order(go_1v6_bp$P.DE),][c(1:i),]
+go_2v3_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust2 - clust3',]
+go_2v3_bp = go_2v3_bp[order(go_2v3_bp$P.DE),][c(1:i),]
+go_2v4_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust2 - clust4',]
+go_2v4_bp = go_2v4_bp[order(go_2v4_bp$P.DE),][c(1:i),]
+go_2v5_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust2 - clust5',]
+go_2v5_bp = go_2v5_bp[order(go_2v5_bp$P.DE),][c(1:i),]
+go_2v6_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust2 - clust6',]
+go_2v6_bp = go_2v6_bp[order(go_2v6_bp$P.DE),][c(1:i),]
+go_3v4_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust3 - clust4',]
+go_3v4_bp = go_3v4_bp[order(go_3v4_bp$P.DE),][c(1:i),]
+go_3v5_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust3 - clust5',]
+go_3v5_bp = go_3v5_bp[order(go_3v5_bp$P.DE),][c(1:i),]
+go_3v6_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust3 - clust6',]
+go_3v6_bp = go_3v6_bp[order(go_3v6_bp$P.DE),][c(1:i),]
+go_4v5_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust4 - clust5',]
+go_4v5_bp = go_4v5_bp[order(go_4v5_bp$P.DE),][c(1:i),]
+go_4v6_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust4 - clust6',]
+go_4v6_bp = go_4v6_bp[order(go_4v6_bp$P.DE),][c(1:i),]
+go_5v6_bp = go_all[go_all$ONTOLOGY == 'BP' & go_all$DE > 1 & go_all$comp == 'clust5 - clust6',]
+go_5v6_bp = go_5v6_bp[order(go_5v6_bp$P.DE),][c(1:i),]
+
+go_bp_all = rbind(go_1v2_bp, go_1v3_bp, go_1v4_bp, go_1v5_bp, go_1v6_bp,
+                  go_2v3_bp, go_2v4_bp, go_2v5_bp, go_2v6_bp,
+                  go_3v4_bp, go_3v5_bp, go_3v6_bp,
+                  go_4v5_bp, go_4v6_bp,
+                  go_5v6_bp)
+
+go_bp_all = go_bp_all[!is.na(go_bp_all$ONTOLOGY),]
+
+go_bp_all$group[go_bp_all$comp == 'clust1 - clust2'] = '1 - 2'
+go_bp_all$group[go_bp_all$comp == 'clust1 - clust3'] = '1 - 3'
+go_bp_all$group[go_bp_all$comp == 'clust1 - clust4'] = '1 - 4'
+go_bp_all$group[go_bp_all$comp == 'clust1 - clust5'] = '1 - 5'
+go_bp_all$group[go_bp_all$comp == 'clust1 - clust6'] = '1 - 6'
+go_bp_all$group[go_bp_all$comp == 'clust2 - clust3'] = '2 -\n 3'
+go_bp_all$group[go_bp_all$comp == 'clust2 - clust4'] = '2 - 4'
+go_bp_all$group[go_bp_all$comp == 'clust2 - clust5'] = '2 - 5'
+go_bp_all$group[go_bp_all$comp == 'clust2 - clust6'] = '2 - 6'
+go_bp_all$group[go_bp_all$comp == 'clust3 - clust4'] = '3 - 4'
+go_bp_all$group[go_bp_all$comp == 'clust3 - clust5'] = '3 - 5'
+go_bp_all$group[go_bp_all$comp == 'clust3 - clust6'] = '3 - 6'
+go_bp_all$group[go_bp_all$comp == 'clust4 - clust5'] = '4 - 5'
+go_bp_all$group[go_bp_all$comp == 'clust4 - clust6'] = '4 - 6'
+go_bp_all$group[go_bp_all$comp == 'clust5 - clust6'] = '5 - 6'
+
+go_bp_all_001 = go_bp_all[go_bp_all$P.DE < 0.001,]
+
+# plotting
+go_plot = ggplot(go_bp_all_001, aes(-log10(P.DE), TERM)) + geom_point(aes(size = DE, color = DE)) + 
+  facet_grid(rows = vars(group), switch = "y", scales = 'free', space = 'free_y') + theme_bw() +
+  labs(y = 'Microbiome cluster contrast', x=expression(-log[10](italic(p)))) + 
+  theme(legend.position = 'bottom') + scale_color_continuous(low = cols[1], high = cols[3], guide = 'legend') + 
+  theme(text = element_text(size = 11)) + 
+  labs(color = 'Differentially methylated genes', size = 'Differentially methylated genes') +
+  theme(strip.placement = "outside")
+```
+
+```{r, out.width = '100%', echo = FALSE}
+go_plot
+```
+
+
+
+#### Plotting qq plots, volcano plots, and manhattan plots: Supplemental Figure S3
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# modified versions of EWASplot code
+# function to plot qq plot with BIF
+qq_plot2 = function(pvector, tvector){
+  bif = round(inflation(bacon(tvector)), 2)
+	l = round(lambda(pvector), 2)
+	o = -log10(sort(pvector, decreasing = FALSE))
+	e = -log10(ppoints(length(pvector)))
+	df = data.frame(o = o, e = e)
+	ggplot2::ggplot(df, ggplot2::aes(e, o)) + ggplot2::geom_point(alpha = 0.5, size = 1) + ggplot2::geom_abline(intercept = 0, slope = 1, color = '#AB3428') + 
+      ggplot2::labs(y = expression(Observed ~ ~-log[10](italic(p))), x = expression(Expected ~ ~-log[10](italic(p)))) + theme_classic() + 
+      ggplot2::annotate("text", x = 1.5, y = (range(o)[2]*0.9), label = paste0('λ = ', l), size = 3.5) + 
+      ggplot2::annotate("text", x = 1.5, y = (range(o)[2]*0.8), label = paste0('BIF = ', l=bif), size = 3.5)
+}
+
+# fixing y-limits on volcano plot
+volcano_plot2 = function(pvector, effectvector, FDR = FALSE, title = NULL, col = 'gray40', col.sig = 'gray18', cex = 0.5, cex.sig = 0.75, alpha = 0.5, alpha.sig = 1, size.line.sig = 0.5){
+	# dataframe for plotting
+	voldat = data.frame(effect = effectvector, P.Value = pvector, logp = -log10(pvector))
+	# Bonferroni and FDR adjustment of p-values
+	voldat$bonf = p.adjust(voldat$P.Value, method = 'bonferroni')
+	if (FDR){
+		voldat$FDR = p.adjust(voldat$P.Value, method = 'fdr')
+	}
+	# variables for point color, size, and alpha
+	voldat$color[voldat$bonf < 0.05] = col.sig  # DMP probes
+	voldat$size[voldat$bonf < 0.05] = cex.sig
+	voldat$alpha[voldat$bonf < 0.05] = alpha.sig
+	if (FDR){
+		voldat$color[voldat$FDR < 0.05] = col.sig
+		voldat$size[voldat$FDR < 0.05] = cex.sig
+		voldat$alpha[voldat$FDR < 0.05] = alpha.sig
+	}
+	voldat$size[is.na(voldat$color)] = cex
+	voldat$alpha[is.na(voldat$color)] = alpha
+	voldat$color[is.na(voldat$color)] = col	
+	
+	volcano = ggplot(voldat, aes(x = effect, y = logp)) + 
+	geom_point(size = voldat$size, alpha = voldat$alpha, color = voldat$color) + 
+	geom_hline(aes(yintercept = -log10(0.05/nrow(voldat))), color = "#AB3428", size = size.line.sig) + 
+	theme_minimal() + scale_y_continuous(expand = c(0, 0), limits = c(0, (max(voldat$logp) + 0.5))) + theme(panel.grid.minor.x = element_blank(), panel.grid.major.y = element_line(size = 0.2, color = 'gray65'), panel.grid.major.x = element_line(size = 0.2, color = 'gray65')) + 
+  labs(y=expression(-log[10](italic(p))), x='Effect estimate') +
+	if (!is.null(title)){
+    	volcano = volcano + labs(title = title)
+    }
+	if (FDR == TRUE){
+		volcano = volcano + geom_hline(aes(yintercept = -log10(max(P.Value[FDR < 0.05]))), color = "#AB3428", size = size.line.sig, linetype = "dashed")
+	}
+	return(volcano)
+}
+
+# layout for plot
+lay = rbind(c(1,2), 3)
+```
+
+
+```{r, out.width = '100%', echo = FALSE}
+# 1 vs. 2
+i = 1
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 1 vs. 2", gp=gpar(fontsize=15))
+)
+
+# 1 vs. 3
+i = 2
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 1 vs. 3", gp=gpar(fontsize=15))
+)
+
+# 1 vs. 4
+i = 3
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 1 vs. 4", gp=gpar(fontsize=15))
+)
+
+# 1 vs. 5
+i = 4
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 1 vs. 5", gp=gpar(fontsize=15))
+)
+
+# 1 vs. 6
+i = 5
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 1 vs. 6", gp=gpar(fontsize=15))
+)
+
+# 2 vs. 3
+i = 6
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 2 vs. 3", gp=gpar(fontsize=15))
+)
+
+# 2 vs. 4
+i = 7
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 2 vs. 4", gp=gpar(fontsize=15))
+)
+
+# 2 vs. 5
+i = 8
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 2 vs. 5", gp=gpar(fontsize=15))
+)
+
+# 2 vs. 6
+i = 9
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 2 vs. 6", gp=gpar(fontsize=15))
+)
+
+# 3 vs. 4
+i = 10
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 3 vs. 4", gp=gpar(fontsize=15))
+)
+
+# 3 vs. 5
+i = 11
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 3 vs. 5", gp=gpar(fontsize=15))
+)
+
+# 3 vs. 6
+i = 12
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 3 vs. 6", gp=gpar(fontsize=15))
+)
+
+# 4 vs. 5
+i = 13
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 4 vs. 5", gp=gpar(fontsize=15))
+)
+
+# 4 vs. 6
+i = 14
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 4 vs. 6", gp=gpar(fontsize=15))
+)
+
+# 5 vs. 6
+i = 15
+probes = data.frame(Name = names(fit2$coefficients[,i]), P.Value = fit2$p.value[,i])
+probes = probes %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = 'Name')
+colnames(probes)[1] = 'cpg'
+
+grid.arrange(qq_plot2(fit2$p.value[,i], fit2$t[,i]) + theme_minimal() + 
+  theme(panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + geom_hline(yintercept = 0, color = 'darkgray', linewidth = 0.2) + geom_vline(xintercept = 0, color = 'darkgray', linewidth = 0.2),
+  volcano_plot2(fit2$p.value[,i], fit2$coefficients[,i], FDR = F),
+  manhattan_plot(probes, FDR = F) + theme(axis.title = element_text(size = 10)), 
+  layout_matrix = lay, top=textGrob("Clusters 5 vs. 6", gp=gpar(fontsize=15))
+)
+```
+
+#### Plotting Beta-values of significant CpGs: Supplemental Figure S4
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+betas.ComBat = M2B(mvals.ComBat)
+
+# significant CpGs to plot
+cpgs = c("cg16797691", "cg06431905", "cg16728516", "cg24592462", "cg04202853", "cg19423735", "cg12665973", "cg15641348",
+    "cg22676654", "cg11510557", "cg02701084", "cg07850967", "cg05629953", "cg13474619", "cg01025283", "cg16424683",
+    "cg12221475", "cg18238734", "cg15346917", "cg15620146", "cg14815005", "cg15700020", "cg01392841", "cg00820581",
+    "cg04892170", "cg13801271", "cg20659435", "cg05483076", "cg05579187", "cg26791489", "cg19084794", "cg23456396",
+    "cg05256656", "cg18567954", "cg23699748", "cg23957800", "cg01074955", "cg19385711", "cg04229722", "cg08197824",
+    "cg19145592", "cg18104979", "cg19565299", "cg00624878", "cg19254532")
+
+# dataframe to plot
+df = data.frame(basename = samp_bmiEdu$Basename, group = samp_bmiEdu$clust)
+df = cbind(df, t(betas.ComBat[cpgs,]))
+
+df_long = pivot_longer(df, cols = cg16797691:cg19254532)
+df_long = df_long[order(df_long$name),]
+
+vect_mean = c()
+for (i in 1:length(cpgs)){
+  vect_mean = c(vect_mean, mean(df_long$value[df_long$name == cpgs[i]]))
+}
+names(vect_mean) = cpgs
+vect_mean = vect_mean[order(vect_mean)]
+df_long$order = NA
+for (i in 1:length(vect_mean)){
+  df_long$order[df_long$name == names(vect_mean)[i]] = paste0(format((i * 0.01), nsmall = 2), names(vect_mean)[i])
+}
+df_long = df_long[order(df_long$order),]
+
+labs = unique(df_long$name)
+
+labels = c("0.01cg16797691" = "cg16797691", "0.02cg06431905" = "cg06431905",
+ "0.03cg16728516" = "cg16728516", "0.04cg24592462" = "cg24592462",
+ "0.05cg04202853" = "cg04202853", "0.06cg19423735" = "cg19423735",
+ "0.07cg12665973" = "cg12665973", "0.08cg15641348" = "cg15641348",
+ "0.09cg22676654" = "cg22676654", "0.10cg11510557" = "cg11510557",
+ "0.11cg02701084" = "cg02701084", "0.12cg07850967" = "cg07850967",
+ "0.13cg05629953" = "cg05629953", "0.14cg13474619" = "cg13474619",
+ "0.15cg01025283" = "cg01025283", "0.16cg16424683" = "cg16424683",
+ "0.17cg12221475" = "cg12221475", "0.18cg18238734" = "cg18238734",
+ "0.19cg15346917" = "cg15346917", "0.20cg15620146" = "cg15620146",
+ "0.21cg14815005" = "cg14815005", "0.22cg15700020" = "cg15700020",
+ "0.23cg01392841" = "cg01392841", "0.24cg00820581" = "cg00820581",
+ "0.25cg04892170" = "cg04892170", "0.26cg13801271" = "cg13801271",
+ "0.27cg20659435" = "cg20659435", "0.28cg05483076" = "cg05483076",
+ "0.29cg05579187" = "cg05579187", "0.30cg26791489" = "cg26791489",
+ "0.31cg19084794" = "cg19084794", "0.32cg23456396" = "cg23456396",
+ "0.33cg05256656" = "cg05256656", "0.34cg18567954" = "cg18567954",
+ "0.35cg23699748" = "cg23699748", "0.36cg23957800" = "cg23957800",
+ "0.37cg01074955" = "cg01074955", "0.38cg19385711" = "cg19385711",
+ "0.39cg04229722" = "cg04229722", "0.40cg08197824" = "cg08197824",
+ "0.41cg19145592" = "cg19145592", "0.42cg18104979" = "cg18104979",
+ "0.43cg19565299" = "cg19565299", "0.44cg00624878" = "cg00624878",
+ "0.45cg19254532" = "cg19254532")
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggplot(df_long, aes(factor(group), value, color = factor(group))) + geom_jitter(size = 0.7, width = 0.1, alpha = 0.25) + 
+  geom_boxplot(outliers = FALSE, color = 'black', lwd = 0.2, alpha = 0) + 
+  facet_wrap(~ order, ncol = 5, scales = 'free_y', labeller=as_labeller(labels)) + scale_color_manual(values = cols[c(3,1,2,10,5,8)]) +
+  theme_tq() + theme(legend.position = 'none') + labs(y = 'Beta-value', x = 'Microbiome cluster') + theme(text = element_text(size = 9)) + 
+  theme(strip.background = element_blank(), strip.text = element_text(color = 'black')) + 
+  theme(panel.spacing.x=unit(0.5, "lines"),panel.spacing.y=unit(0.5, "lines"))
+```
+
+#### Plotting Beta-values of significant CpGs in FOXJ3, FKBP11, CREBBP, and INPP5D: Figure 4
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# plotting CpGs for main text
+df_long2 = df_long[df_long$name %in% c('cg24592462', 'cg15620146', 'cg00624878', 'cg18104979', 'cg13801271', 'cg01392841'),]
+df_long2 = df_long2[order(df_long2$name),]
+
+df_long2$titles = rep(c('bold(C) ~ cg00624878', 'bold(F) ~ cg01392841', 'bold(E) ~ cg13801271', 'bold(B) ~ cg15620146', 'bold(D) ~ cg18104979', 'bold(A) ~ cg24592462'), each = 372)
+df_long2$titles = factor(df_long2$titles, levels = c('bold(A) ~ cg24592462', 'bold(B) ~ cg15620146', 'bold(C) ~ cg00624878', 'bold(D) ~ cg18104979', 'bold(E) ~ cg13801271', 'bold(F) ~ cg01392841'))
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggplot(df_long2[df_long2$name %in% c('cg24592462', 'cg15620146', 'cg00624878', 'cg18104979'),], aes(factor(group), value, fill = factor(group), color = factor(group))) +
+  geom_jitter(size = 0.8, width = 0.1, alpha = 0.4) + 
+  stat_halfeye(adjust = 1, justification = -0.3, .width = 0, point_colour = NA) +
+  geom_boxplot(width = 0.3, color = 'black', alpha = 0, outlier.color = NA, lwd = 0.2) +
+  scale_color_manual(values = cols[c(3,1,2,10,5,8)]) + scale_fill_manual(values = cols[c(3,1,2,10,5,8)]) +
+  theme_tq() + theme(legend.position = 'none') + labs(y = 'Beta-value', x = 'Microbiome cluster') +
+  facet_wrap(~ titles, ncol = 2, scales = 'free_y', labeller = label_parsed) +
+  theme(strip.background = element_blank(), strip.text = element_text(color = 'black', size = 12, hjust = 0)) + 
+  theme(panel.spacing.x=unit(0.5, "lines"),panel.spacing.y=unit(0.5, "lines")) 
+```
+
+
+#### Plotting plotting mQTLs: Supplemental Figure S5
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+df_mQTL = data.frame(cpg = rep(c('cg01392841', 'cg13801271', 'cg15825916'), each = 372), 
+  beta = c(betas.ComBat['cg01392841',], betas.ComBat['cg13801271',], betas.ComBat['cg15825916',]),
+  pos = c(rep(anno$pos[anno$Name == 'cg01392841'], times = 372) + as.numeric(samp_bmiEdu$clust)*0.1 - 0.28, 
+    rep(anno$pos[anno$Name == 'cg13801271'], times = 372) + as.numeric(samp_bmiEdu$clust)*0.08 - 0.28, rep(anno$pos[anno$Name == 'cg15825916'], times = 372) + as.numeric(samp_bmiEdu$clust)*0.08 - 0.28),
+  clust = rep(samp_bmiEdu$clust, times = 3),
+  id = rep(samp_bmiEdu$Basename, times = 3))
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggplot(df_mQTL, aes(pos, beta, color = factor(clust), group = id, label = cpg)) + geom_line(alpha = 0.2, color = 'gray') + geom_jitter(width = 0.1, size = 0.9, alpha = 0.4) + 
+  theme_tq() + scale_color_manual(values = cols[c(3,1,2,10,5,8)]) + labs(x = 'Chromosome 19 position', y = 'Beta-value') +
+  scale_x_break(c(47016875, 47016885), scales = 1) + scale_x_break(c(47017030, 47017042), scales = 1.5) +
+  theme(axis.text.x=element_text(angle = 90, hjust = 1, vjust = 0.5)) + theme(legend.position = 'right') + guides(color=guide_legend(title="Cluster")) + 
+  annotate('text', x = 47016869, y = 0.23, label = 'cg01392841', angle = 90, size = 3) + annotate('text', x = 47017048, y = 0.48, label = 'cg13801271', angle = 90, size = 3) +
+  annotate('text', x = 47017050, y = 0.48, label = 'cg15825916', angle = 90, size = 3) + ylim(0,0.55)
+```
+
+
+#### Plotting clusters: Supplemental Figure S2
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# Jensen-Shannon divergence 
+jsd_glom = phyloseq::distance(ps4_rare_mean_glom, method = "jsd")
+head(jsd_glom)
+
+MDS = ordinate(ps4_rare_mean_glom, "PCoA", distance=jsd_glom)
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggpairs(data.frame(MDS$vectors)[samp_bmiEdu$Sample_ID,c(1:5)], aes(color = factor(samp_bmiEdu$clust), alpha = 0.8), upper = "blank", axisLabels = "internal") + 
+  theme_minimal() + scale_color_manual(values = cols[c(3,1,2,10,5,8)]) 
+```
+
+
+#### ANCOM-BC FDR significant associations: Figure 6
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# FDR significant associations and plotting: Table 3, Table S4
+df_ancom_all_sig = df_ancom_all[df_ancom_all$diff,]
+# add IQR of M-values
+df_ancom_all_sig$iqr = NA
+for (i in 1:nrow(df_ancom_all_sig)){
+  df_ancom_all_sig$iqr[i] = IQR(mvals.ComBat[df_ancom_all_sig$cpg[i],])
+}
+df_ancom_all_sig$logFCperIQR = df_ancom_all_sig$lfc * df_ancom_all_sig$iqr
+
+# plotting associations that passed sensitivity test
+df_ancom_all_sig_sens = df_ancom_all_sig[df_ancom_all_sig$sens,]
+df_ancom_all_sig_sens$taxon[df_ancom_all_sig_sens$taxon == 'unclassified_Actinomycetales'] = 'Unclassified Actinomycetales'
+df_ancom_all_sig_sens$taxon = factor(df_ancom_all_sig_sens$taxon, levels = c('Unclassified Actinomycetales', 'Anaerococcus', 'Corynebacterium', 'Moraxella', 'Peptoniphilus', 'Propionibacterium'))
+df_ancom_all_sig_sens$anno = round(df_ancom_all_sig_sens$logFCperIQR, 2)
+df_ancom_all_sig_sens$cpg = c("cg00624878 (*CREBBP*)", "cg01074955 (*NPHP4*)", "cg01074955 (*NPHP4*)", "cg01074955 (*NPHP4*)", "cg01074955 (*NPHP4*)", "cg01074955 (*NPHP4*)", "cg04229722", "cg04892170 (*ADAM12*)",
+    "cg05256656 (*SLC9A5*)", "cg05256656 (*SLC9A5*)", "cg08197824", "cg13801271", "cg18104979 (*INPP5D*)", "cg18567954 (*DTX1*)", "cg19145592 (*SNORD115-46*)", "cg19145592 (*SNORD115-46*)", "cg19254532 (*C3*)", 
+    "cg19565299 (*D2HGDH*)", "cg23456396 (*ABCA17P*)", "cg23699748", "cg23957800 (*SCAMP4*)")
+df_ancom_all_sig_sens$cpg = factor(df_ancom_all_sig_sens$cpg, levels = c("cg01074955 (*NPHP4*)", "cg05256656 (*SLC9A5*)", "cg19145592 (*SNORD115-46*)", "cg23699748", "cg18104979 (*INPP5D*)", "cg19565299 (*D2HGDH*)",
+    "cg08197824", "cg04892170 (*ADAM12*)", "cg18567954 (*DTX1*)", "cg04229722", "cg23456396 (*ABCA17P*)",  "cg00624878 (*CREBBP*)", "cg23957800 (*SCAMP4*)", "cg19254532 (*C3*)", "cg13801271"))
+
+```
+
+```{r, out.width = '100%', echo = FALSE}
+ggplot(df_ancom_all_sig_sens, aes(cpg, taxon, fill = logFCperIQR, label = anno)) + geom_raster() +
+    scale_fill_gradient2(low = cols[3], mid = "white", high = cols[8], name = 'logFC per IQR of M-values') + 
+    theme_bw() + theme(panel.grid.major = element_blank()) +
+    geom_vline(xintercept = c(0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5), color = 'black', linewidth = 0.1) +
+    geom_hline(yintercept = c(0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5), color = 'black', linewidth = 0.1) +
+    scale_y_discrete(limits = c('Unclassified Actinomycetales', 'Anaerococcus', 'Corynebacterium', 'Moraxella', 'Peptoniphilus', 'Propionibacterium'), expand = c(0, 0)) +
+    scale_x_discrete(limits = unique(df_ancom_all_sig_sens$cpg), expand = c(0, 0), guide = guide_axis(angle = 45)) + labs(x = '', y = '') +
+    theme(legend.position = 'bottom') + theme(axis.ticks = element_blank()) + geom_text(size = 3) + 
+    theme(axis.text.x = ggtext::element_markdown(margin = margin(b = -0.75, unit = "cm"))) + theme(legend.title = element_text(size = 9))
+```
+
+
+#### Epigenetic age ANCOM-BC volcano plot: Supplemental Figure S6
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+voldat = data.frame(effect = df_ancom_all_EA[df_ancom_all_EA$cpg == 'AgeAccelerationResidual_nasal',]$lfc, P.Value = df_ancom_all_EA[df_ancom_all_EA$cpg == 'AgeAccelerationResidual_nasal',]$p, 
+    logp = -log10(df_ancom_all_EA[df_ancom_all_EA$cpg == 'AgeAccelerationResidual_nasal',]$p), sens = df_ancom_all_EA[df_ancom_all_EA$cpg == 'AgeAccelerationResidual_nasal',]$sens,
+    genus = df_ancom_all_EA[df_ancom_all_EA$cpg == 'AgeAccelerationResidual_nasal',]$taxon)
+	# Bonferroni and FDR adjustment of p-values
+voldat$bonf = p.adjust(voldat$P.Value, method = 'bonferroni')
+voldat$FDR = p.adjust(voldat$P.Value, method = 'fdr')
+# variables for point color, size, and alpha
+voldat$color[voldat$FDR < 0.05 & voldat$sens] = 'black'
+voldat$size[voldat$FDR < 0.05 & voldat$sens] = 1.5
+voldat$alpha[voldat$FDR < 0.05 & voldat$sens] = 1
+voldat$size[is.na(voldat$size)] = 1.5
+voldat$alpha[is.na(voldat$alpha)] = 0.8
+voldat$color[is.na(voldat$color)] = 'darkgray'
+voldat$label = NA
+voldat$label[voldat$FDR < 0.05 & voldat$sens] = c("italic('Corynebacterium')")
+```	
+
+```{r, out.width = '75%', echo = FALSE}
+ggplot(voldat, aes(x = effect, y = logp, label = label)) + 
+	geom_point(size = voldat$size, alpha = voldat$alpha, color = voldat$color) + 
+	geom_hline(aes(yintercept = -log10(max(P.Value[FDR < 0.05]))), color = "#AB3428") +
+	theme_minimal() + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, (max(voldat$logp) + 0.5))) + scale_x_continuous(limits = c(-0.21, 0.21)) +
+  theme(panel.grid.minor.x = element_blank(), panel.grid.major.y = element_line(size = 0.2, color = 'gray65'), panel.grid.major.x = element_line(size = 0.2, color = 'gray65')) + 
+  labs(y=expression(-log[10](italic(p))), x='logFC') +
+  geom_label_repel(nudge_y = 0.5, nudge_x = -1/20, fill = alpha(c("white"),0.4), size = 2.8, parse = TRUE)
+```
+

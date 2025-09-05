@@ -1,0 +1,941 @@
+---
+title: "Project Viva nasal microbiome and epigenome analyses"
+author: 
+  - name: "Anne Bozack"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+## Libraries
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+library(phyloseq)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(minfi)
+library(table1)
+library(limma)
+library(ENmix)
+library(missMethyl)
+library(dplyr)
+library(bacon)
+library(tidyr)
+library(DescTools)
+library(emmeans)
+# remotes::install_github("david-barnett/microViz")
+library(microViz)
+```
+
+## Load data
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# microbiome data
+# phyloseq objects: 
+# (1) microbiome data before glom for combining OTUs, after removing OTUs with <10 reads in individual samples (ps4_noncontam_10k_ge10reads); 
+# (2) microbiome data with rarefaction (ps4_rare_mean);
+# (3) microbiome data with cluster assignment (ps4_rare_mean_glom)
+load('microbiome data.rdata')
+
+# DNAm and phenotype data:
+# (1) Mvalues (mvals.ComBat)
+# (2) phenotype file including microbiome cluster assignments and covariates (samp_bmiEdu)
+load('mvals_sampInfo_microbiomeEWAS_completeCovars.rdata')
+
+# annotation file
+anno = getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+anno = data.frame(anno)
+```
+
+
+## Descritive statistics by cluster
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# function to calculate p-values for differences between clusters
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        # For numeric variables
+        p <- kruskal.test(y, g)$p.value
+    } else {
+        # For categorical variables
+        p <- fisher.test(table(y, g), simulate.p.value = T)$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+```
+
+#### Descriptive statistics: Table 1
+```{r, warning=FALSE, message=FALSE, echo=FALSE}
+table1(~ runNo + sine_ns_12y + cosine_ns_12y + female_d + re_teenc + age_mom_enroll_d + gt70k + coll_grad + csection + bmiz_cdc_ET + Age_nasal + current_asthma_12y + asthma_medication_QU12 + Shannon + Simpson + Observed | clust, data = samp_bmiEdu, extra.col=list(`P-value`=pvalue))
+```
+
+## Nasal DNAm EWAS
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# variables as factors
+samp_bmiEdu$race_child2 = factor(samp_bmiEdu$race_child2)
+samp_bmiEdu$female_d = factor(samp_bmiEdu$female_d)
+samp_bmiEdu$gt70k = factor(samp_bmiEdu$gt70k)
+samp_bmiEdu$coll_grad = factor(samp_bmiEdu$coll_grad)
+samp_bmiEdu$csection = factor(samp_bmiEdu$csection)
+samp_bmiEdu$cluster_jsd_glom_k6 = factor(samp_bmiEdu$cluster_jsd_glom_k6)
+samp_bmiEdu$runNo = factor(samp_bmiEdu$runNo)
+samp_bmiEdu$re_teenc = as.character(samp_bmiEdu$re_teenc)
+samp_bmiEdu$re_teenc[samp_bmiEdu$re_teenc == '>1 race or other'] = 'mt1_other'
+samp_bmiEdu$re_teenc = factor(samp_bmiEdu$re_teenc, levels = c('White', 'Black', 'Hispanic', 'Asian', 'mt1_other'))
+samp_bmiEdu$re_teenc2 = samp_bmiEdu$re_teenc
+samp_bmiEdu$re_teenc2[samp_bmiEdu$re_teenc2 == 'Asian'] = 'mt1_other'
+samp_bmiEdu$re_teenc2 = factor(samp_bmiEdu$re_teenc2, levels = c('White', 'Black', 'Hispanic', 'mt1_other'))
+samp_bmiEdu$clust = factor(samp_bmiEdu$clust)
+levels(samp_bmiEdu$clust)
+# "1" "2" "3" "4" "5" "6"
+
+# check alignment
+all(colnames(mvals.ComBat) == samp_bmiEdu$Basename)
+# TRUE
+identical(colnames(mvals.ComBat), samp_bmiEdu$Basename)
+# TRUE
+
+# function to calculate lambda
+lambda = function(p) {
+    return(median(qchisq(p, df=1, lower.tail=FALSE), na.rm=TRUE) / qchisq(0.5, df=1))
+}
+```
+
+
+### Associaitons with cluster, adjusted for season, refactor components, child sex, age, race/ethnicity, BMI z-score, maternal education, and run (not adjusted for medication use)
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+design  = model.matrix(~ 0 + clust + sine_ns_12y + cosine_ns_12y + RC10_1 + RC10_2 + RC10_3 + RC10_4  + RC10_5 + RC10_6 + RC10_7 + RC10_8 + RC10_9 + RC10_10 + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo, data=samp_bmiEdu)
+fit = lmFit(mvals.ComBat, design, method = 'robust', maxit = 50)
+
+# all pair-wise comparisons between clusters 
+# see discussion at https://support.bioconductor.org/p/133263/ and https://support.bioconductor.org/p/65253/
+contrast.matrix <- makeContrasts(clust1-clust2, clust1-clust3, clust1-clust4, clust1-clust5, clust1-clust6, clust2-clust3, clust2-clust4, clust2-clust5, clust2-clust6, clust3-clust4, clust3-clust5, clust3-clust6, clust4-clust5, clust4-clust6, clust5-clust6, levels=design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+# results_hierBonf <- decideTests(fit2, adjust.method = 'bonferroni', method="hierarchical")
+# results_hierHolm <- decideTests(fit2, adjust.method = 'holm', method="hierarchical")
+# results_nestHolm <- decideTests(fit2, adjust.method = 'holm', method="nestedF")
+results_globalBonf <- decideTests(fit2, adjust.method = 'bonferroni', method="global")
+results_globalFDR <- decideTests(fit2, adjust.method = 'fdr', method="global")
+
+save(fit2, results_globalBonf, results_globalFDR, files = 'EWAS_global_Bonf_FDR_results.rdata')
+```
+
+##### Global method with Holm adjustment (Bonferroni and FDR-significant associations)
+```{r}
+print(summary(results_globalBonf))
+print(summary(results_globalFDR))
+```
+
+
+#### Get effect estimates for probes signficant using global method with Bonferroni adjustment: Table 2 and Supplemental Table S1
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# all p-values
+p_all = c(fit2$p.value[,1], fit2$p.value[,2], fit2$p.value[,3], fit2$p.value[,4], fit2$p.value[,5],
+                    fit2$p.value[,6], fit2$p.value[,7], fit2$p.value[,8], fit2$p.value[,9], 
+                    fit2$p.value[,10], fit2$p.value[,11], fit2$p.value[,12], 
+                    fit2$p.value[,13], fit2$p.value[,14], fit2$p.value[,15])
+p_all = data.frame(cpg = rep(rownames(fit2$coefficients), times = 15), comp = rep(colnames(fit2$coefficients), each = nrow(fit2$coefficients)), p = p_all)
+
+p_bonf = p.adjust(c(fit2$p.value[,1], fit2$p.value[,2], fit2$p.value[,3], fit2$p.value[,4], fit2$p.value[,5],
+                    fit2$p.value[,6], fit2$p.value[,7], fit2$p.value[,8], fit2$p.value[,9], 
+                    fit2$p.value[,10], fit2$p.value[,11], fit2$p.value[,12], 
+                    fit2$p.value[,13], fit2$p.value[,14], fit2$p.value[,15]), method = 'bonferroni')
+p_bonf = data.frame(cpg = rep(rownames(fit2$coefficients), times = 15), comp = rep(colnames(fit2$coefficients), each = nrow(fit2$coefficients)), p_bonf = p_bonf)
+
+i = 1
+probeSig1 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig1$coef = fit2$coefficients[probeSig1$cpg,i]
+probeSig1$p = fit2$p.value[probeSig1$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig1$p_bonf = p_bonf_i[probeSig1$cpg,'p_bonf']
+probeSig1$bonf_sig = ifelse(probeSig1$p_bonf < 0.05, 1, 0)
+probeSig1$comp = colnames(results_globalFDR)[i]
+
+i = 2
+probeSig2 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig2$coef = fit2$coefficients[probeSig2$cpg,i]
+probeSig2$p = fit2$p.value[probeSig2$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig2$p_bonf = p_bonf_i[probeSig2$cpg,'p_bonf']
+probeSig2$bonf_sig = ifelse(probeSig2$p_bonf < 0.05, 1, 0)
+probeSig2$comp = colnames(results_globalFDR)[i]
+
+i = 3
+probeSig3 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig3$coef = fit2$coefficients[probeSig3$cpg,i]
+probeSig3$p = fit2$p.value[probeSig3$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig3$p_bonf = p_bonf_i[probeSig3$cpg,'p_bonf']
+probeSig3$bonf_sig = ifelse(probeSig3$p_bonf < 0.05, 1, 0)
+probeSig3$comp = colnames(results_globalFDR)[i]
+
+i = 4
+probeSig4 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig4$coef = fit2$coefficients[probeSig4$cpg,i]
+probeSig4$p = fit2$p.value[probeSig4$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig4$p_bonf = p_bonf_i[probeSig4$cpg,'p_bonf']
+probeSig4$bonf_sig = ifelse(probeSig4$p_bonf < 0.05, 1, 0)
+probeSig4$comp = colnames(results_globalFDR)[i]
+
+i = 5
+probeSig5 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig5$coef = fit2$coefficients[probeSig5$cpg,i]
+probeSig5$p = fit2$p.value[probeSig5$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig5$p_bonf = p_bonf_i[probeSig5$cpg,'p_bonf']
+probeSig5$bonf_sig = ifelse(probeSig5$p_bonf < 0.05, 1, 0)
+probeSig5$comp = colnames(results_globalFDR)[i]
+
+i = 6
+probeSig6 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig6$coef = fit2$coefficients[probeSig6$cpg,i]
+probeSig6$p = fit2$p.value[probeSig6$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig6$p_bonf = p_bonf_i[probeSig6$cpg,'p_bonf']
+probeSig6$bonf_sig = ifelse(probeSig6$p_bonf < 0.05, 1, 0)
+probeSig6$comp = colnames(results_globalFDR)[i]
+
+i = 7
+probeSig7 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig7$coef = fit2$coefficients[probeSig7$cpg,i]
+probeSig7$p = fit2$p.value[probeSig7$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig7$p_bonf = p_bonf_i[probeSig7$cpg,'p_bonf']
+probeSig7$bonf_sig = ifelse(probeSig7$p_bonf < 0.05, 1, 0)
+probeSig7$comp = colnames(results_globalFDR)[i]
+
+i = 8
+probeSig8 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig8$coef = fit2$coefficients[probeSig8$cpg,i]
+probeSig8$p = fit2$p.value[probeSig8$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig8$p_bonf = p_bonf_i[probeSig8$cpg,'p_bonf']
+probeSig8$bonf_sig = ifelse(probeSig8$p_bonf < 0.05, 1, 0)
+probeSig8$comp = colnames(results_globalFDR)[i]
+
+i = 9
+probeSig9 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig9$coef = fit2$coefficients[probeSig9$cpg,i]
+probeSig9$p = fit2$p.value[probeSig9$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig9$p_bonf = p_bonf_i[probeSig9$cpg,'p_bonf']
+probeSig9$bonf_sig = ifelse(probeSig9$p_bonf < 0.05, 1, 0)
+probeSig9$comp = colnames(results_globalFDR)[i]
+
+i = 10
+probeSig10 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig10$coef = fit2$coefficients[probeSig10$cpg,i]
+probeSig10$p = fit2$p.value[probeSig10$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig10$p_bonf = p_bonf_i[probeSig10$cpg,'p_bonf']
+probeSig10$bonf_sig = ifelse(probeSig10$p_bonf < 0.05, 1, 0)
+probeSig10$comp = colnames(results_globalFDR)[i]
+
+i = 11
+probeSig11 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig11$coef = fit2$coefficients[probeSig11$cpg,i]
+probeSig11$p = fit2$p.value[probeSig11$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig11$p_bonf = p_bonf_i[probeSig11$cpg,'p_bonf']
+probeSig11$bonf_sig = ifelse(probeSig11$p_bonf < 0.05, 1, 0)
+probeSig11$comp = colnames(results_globalFDR)[i]
+
+i = 12
+probeSig12 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig12$coef = fit2$coefficients[probeSig12$cpg,i]
+probeSig12$p = fit2$p.value[probeSig12$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig12$p_bonf = p_bonf_i[probeSig12$cpg,'p_bonf']
+probeSig12$bonf_sig = ifelse(probeSig12$p_bonf < 0.05, 1, 0)
+probeSig12$comp = colnames(results_globalFDR)[i]
+
+i = 13
+probeSig13 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig13$coef = fit2$coefficients[probeSig13$cpg,i]
+probeSig13$p = fit2$p.value[probeSig13$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig13$p_bonf = p_bonf_i[probeSig13$cpg,'p_bonf']
+probeSig13$bonf_sig = ifelse(probeSig13$p_bonf < 0.05, 1, 0)
+probeSig13$comp = colnames(results_globalFDR)[i]
+
+i = 14
+probeSig14 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig14$coef = fit2$coefficients[probeSig14$cpg,i]
+probeSig14$p = fit2$p.value[probeSig14$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig14$p_bonf = p_bonf_i[probeSig14$cpg,'p_bonf']
+probeSig14$bonf_sig = ifelse(probeSig14$p_bonf < 0.05, 1, 0)
+probeSig14$comp = colnames(results_globalFDR)[i]
+
+i = 15
+probeSig15 = data.frame(cpg = rownames(results_globalFDR)[results_globalFDR[,i] != 0])
+probeSig15$coef = fit2$coefficients[probeSig15$cpg,i]
+probeSig15$p = fit2$p.value[probeSig15$cpg,i]
+p_bonf_i = p_bonf[p_bonf$comp == colnames(results_globalFDR)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig15$p_bonf = p_bonf_i[probeSig15$cpg,'p_bonf']
+probeSig15$bonf_sig = ifelse(probeSig15$p_bonf < 0.05, 1, 0)
+probeSig15$comp = colnames(results_globalFDR)[i]
+
+# combine
+probeSig = rbind(probeSig1, probeSig2, probeSig3, probeSig4, probeSig5, probeSig6, probeSig7, probeSig8, probeSig9, probeSig10, probeSig11, probeSig12, probeSig13, probeSig14, probeSig15)
+colnames(probeSig)[1] = 'Name'
+
+# add annotation information
+probeSig = probeSig %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = c('Name'))
+
+
+# effect estimates in Beta value scale
+# function to estimate delta Beta using M-model-M-mean method from https://pubmed.ncbi.nlm.nih.gov/30184051/
+deltaBeta = function(cpg, comparison, fitM, Mvals){
+  M0 = mean(Mvals[cpg,])
+  deltaM = fitM$coefficients[cpg, comparison]
+  deltaBeta = (2^(M0 + deltaM)/(1+2^(M0 + deltaM))) - (2^M0/(1+2^M0))
+  return(deltaBeta)
+}
+
+probeSig$deltaB = NA
+for (i in 1:nrow(probeSig)){
+  probeSig$deltaB[i] = deltaBeta(probeSig$Name[i], probeSig$comp[i], fit2, mvals.ComBat)
+}
+
+probeSig = probeSig[order(probeSig$chr, probeSig$pos),]
+
+dim(probeSig)[1]
+# 2111
+length(unique(probeSig$Name))
+# 1191
+
+
+# results for all comparisons of Bonferroni significant probes
+probes = unique(probeSig$Name[probeSig$bonf_sig == 1])
+probesSig_all = data.frame(matrix(ncol = 5))
+colnames(probesSig_all) = c('cpg', 'coef', 'p', 'p_bonf', 'comp')
+for (i in 1:15){
+  df_temp = data.frame(cpg = probes, coef = fit2$coefficients[probes,i], p = fit2$p.value[probes,i], p_bonf = NA, comp = colnames(results_globalBonf)[i])
+  for (j in 1:nrow(df_temp)){
+    df_temp$p_bonf[j] = p_bonf$p_bonf[p_bonf$cpg == df_temp$cpg[j] & p_bonf$comp == df_temp$comp[j]]
+  }
+  probesSig_all = rbind(probesSig_all, df_temp)
+}
+probesSig_all = probesSig_all[-1,]
+colnames(probesSig_all)[1] = 'Name'
+
+probesSig_all = probesSig_all %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = c('Name'))
+
+# effect estimates in Beta value scale
+probesSig_all$deltaB = NA
+for (i in 1:nrow(probesSig_all)){
+  probesSig_all$deltaB[i] = deltaBeta(probesSig_all$Name[i], probesSig_all$comp[i], fit2, mvals.ComBat)
+}
+
+probesSig_all = probesSig_all[order(probesSig_all$chr, probesSig_all$pos),]
+```
+
+
+#### Pathway analysis: Supplemental Table S2
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# FDR significant CpGs by contrast
+go_1v2 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust1 - clust2'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_1v2$comp = 'clust1 - clust2'
+go_1v3 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust1 - clust3'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_1v3$comp = 'clust1 - clust3'
+go_1v4 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust1 - clust4'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_1v4$comp = 'clust1 - clust4'
+go_1v5 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust1 - clust5'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_1v5$comp = 'clust1 - clust5'
+go_1v6 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust1 - clust6'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_1v6$comp = 'clust1 - clust6'
+go_2v3 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust2 - clust3'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_2v3$comp = 'clust2 - clust3'
+go_2v4 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust2 - clust4'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_2v4$comp = 'clust2 - clust4'
+go_2v5 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust2 - clust5'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_2v5$comp = 'clust2 - clust5'
+go_2v6 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust2 - clust6'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_2v6$comp = 'clust2 - clust6'
+go_3v4 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust3 - clust4'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_3v4$comp = 'clust3 - clust4'
+go_3v5 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust3 - clust5'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_3v5$comp = 'clust3 - clust5'
+go_3v6 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust3 - clust6'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_3v6$comp = 'clust3 - clust6'
+go_4v5 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust4 - clust5'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_4v5$comp = 'clust4 - clust5'
+go_4v6 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust4 - clust6'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_4v6$comp = 'clust4 - clust6'
+go_5v6 = gometh(sig.cpg = probeSig$Name[probeSig$comp == 'clust5 - clust6'], all.cpg = rownames(mvals.ComBat), array.type = 'EPIC', collection = 'GO', sig.genes = TRUE)
+go_5v6$comp = 'clust5 - clust6'
+go_all = rbind(go_1v2, go_1v3, go_1v4, go_1v5, go_1v6, 
+              go_2v3, go_2v4, go_2v5, go_2v6,
+              go_3v4, go_3v5, go_3v6,
+              go_4v5, go_4v6, go_5v6)
+go_all = go_all[go_all$P.DE < 0.05 & go_all$DE > 1,]        
+
+save(go_all, file = 'go_all.rdata')
+```
+
+
+#### Looking at mQTLs with K-means 
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+betas.ComBat = M2B(mvals.ComBat)
+
+k_cg13801271 = kmeans(betas.ComBat['cg13801271',], 2)
+k_cg13801271$centers
+# 1 0.02116435
+# 2 0.22293248
+table(samp_bmiEdu$clust, k_cg13801271$cluster)
+chisq.test(table(samp_bmiEdu$clust, k_cg13801271$cluster))
+#         Pearson's Chi-squared test
+# X-squared = 19.991, df = 5, p-value = 0.001255
+
+k_cg01392841 = kmeans(betas.ComBat['cg01392841',], 2)
+k_cg01392841$centers
+# 1 0.07788809
+# 2 0.02102056
+table(samp_bmiEdu$clust, k_cg01392841$cluster)
+chisq.test(table(samp_bmiEdu$clust, k_cg01392841$cluster))
+# X-squared = 24.096, df = 5, p-value = 0.0002081
+```
+
+
+### Associaitons with cluster, adjusted for season, refactor components, child sex, age, race/ethnicity, BMI z-score, maternal education, run, and medicaiton use: Supplemental Table 8
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+samp_bmiEdu_med = samp_bmiEdu[!is.na(samp_bmiEdu$asthma_medication_QU12),]
+dim(samp_bmiEdu_med)
+# 368  95
+mvals.ComBat_med = mvals.ComBat[,samp_bmiEdu_med$Basename]
+dim(mvals.ComBat_med)
+# 715023    368
+
+# check alignment
+all(colnames(mvals.ComBat_med) == samp_bmiEdu_med$Basename)
+# TRUE
+identical(colnames(mvals.ComBat_med), samp_bmiEdu_med$Basename)
+# TRUE
+
+samp_bmiEdu_med$asthma_medication_QU12 = factor(samp_bmiEdu_med$asthma_medication_QU12)
+
+design  = model.matrix(~ 0 + clust + sine_ns_12y + cosine_ns_12y + RC10_1 + RC10_2 + RC10_3 + RC10_4  + RC10_5 + RC10_6 + RC10_7 + RC10_8 + RC10_9 + RC10_10 + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo + asthma_medication_QU12, data=samp_bmiEdu_med)
+fit = lmFit(mvals.ComBat_med, design, method = 'robust', maxit = 50)
+
+# all pair-wise comparisons between clusters 
+# see discussion at https://support.bioconductor.org/p/133263/ and https://support.bioconductor.org/p/65253/
+contrast.matrix <- makeContrasts(clust1-clust2, clust1-clust3, clust1-clust4, clust1-clust5, clust1-clust6, clust2-clust3, clust2-clust4, clust2-clust5, clust2-clust6, clust3-clust4, clust3-clust5, clust3-clust6, clust4-clust5, clust4-clust6, clust5-clust6, levels=design)
+fit_med <- contrasts.fit(fit, contrast.matrix)
+fit_med <- eBayes(fit_med)
+# results_hierBonf <- decideTests(fit2, adjust.method = 'bonferroni', method="hierarchical")
+# results_hierHolm <- decideTests(fit2, adjust.method = 'holm', method="hierarchical")
+# results_nestHolm <- decideTests(fit2, adjust.method = 'holm', method="nestedF")
+results_globalBonf_med <- decideTests(fit_med, adjust.method = 'bonferroni', method="global")
+results_globalFDR_med <- decideTests(fit_med, adjust.method = 'fdr', method="global")
+
+save(results_globalBonf_med, results_globalFDR_med, fit_med, file = "EWAS_global_Bonf_FDR_results_medAdj.rdata")
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(results_globalBonf_med)
+```
+
+#### Get effect estimates for probes signficant using global method with Bonferroni and adjustment
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# Bonferroni-adjusted p-values
+p_bonf_med = p.adjust(c(fit_med$p.value[,1], fit_med$p.value[,2], fit_med$p.value[,3], fit_med$p.value[,4], fit_med$p.value[,5],
+                    fit_med$p.value[,6], fit_med$p.value[,7], fit_med$p.value[,8], fit_med$p.value[,9], 
+                    fit_med$p.value[,10], fit_med$p.value[,11], fit_med$p.value[,12], 
+                    fit_med$p.value[,13], fit_med$p.value[,14], fit_med$p.value[,15]), method = 'bonferroni')
+coef_med = c(fit_med$coefficients[,1], fit_med$coefficients[,2], fit_med$coefficients[,3], fit_med$coefficients[,4], fit_med$coefficients[,5],
+                    fit_med$coefficients[,6], fit_med$coefficients[,7], fit_med$coefficients[,8], fit_med$coefficients[,9], 
+                    fit_med$coefficients[,10], fit_med$coefficients[,11], fit_med$coefficients[,12], 
+                    fit_med$coefficients[,13], fit_med$coefficients[,14], fit_med$coefficients[,15])     
+p_med = c(fit_med$p.value[,1], fit_med$p.value[,2], fit_med$p.value[,3], fit_med$p.value[,4], fit_med$p.value[,5],
+                    fit_med$p.value[,6], fit_med$p.value[,7], fit_med$p.value[,8], fit_med$p.value[,9], 
+                    fit_med$p.value[,10], fit_med$p.value[,11], fit_med$p.value[,12], 
+                    fit_med$p.value[,13], fit_med$p.value[,14], fit_med$p.value[,15])                 
+p_bonf_med = data.frame(cpg = rep(rownames(fit_med$coefficients), times = 15), comp = rep(colnames(fit_med$coefficients), each = nrow(fit_med$coefficients)), coef = coef_med, p = p_med, p_bonf = p_bonf_med)
+
+i = 1
+probeSig1_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig1_med$coef = fit_med$coefficients[probeSig1_med$cpg,i]
+probeSig1_med$p = fit_med$p.value[probeSig1_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig1_med$p_bonf = p_bonf_i[probeSig1_med$cpg,'p_bonf']
+probeSig1_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 5
+probeSig5_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig5_med$coef = fit_med$coefficients[probeSig5_med$cpg,i]
+probeSig5_med$p = fit_med$p.value[probeSig5_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig5_med$p_bonf = p_bonf_i[probeSig5_med$cpg,'p_bonf']
+probeSig5_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 6
+probeSig6_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig6_med$coef = fit_med$coefficients[probeSig6_med$cpg,i]
+probeSig6_med$p = fit_med$p.value[probeSig6_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig6_med$p_bonf = p_bonf_i[probeSig6_med$cpg,'p_bonf']
+probeSig6_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 7
+probeSig7_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig7_med$coef = fit_med$coefficients[probeSig7_med$cpg,i]
+probeSig7_med$p = fit_med$p.value[probeSig7_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig7_med$p_bonf = p_bonf_i[probeSig7_med$cpg,'p_bonf']
+probeSig7_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 8
+probeSig8_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig8_med$coef = fit_med$coefficients[probeSig8_med$cpg,i]
+probeSig8_med$p = fit_med$p.value[probeSig8_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig8_med$p_bonf = p_bonf_i[probeSig8_med$cpg,'p_bonf']
+probeSig8_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 9
+probeSig9_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig9_med$coef = fit_med$coefficients[probeSig9_med$cpg,i]
+probeSig9_med$p = fit_med$p.value[probeSig9_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig9_med$p_bonf = p_bonf_i[probeSig9_med$cpg,'p_bonf']
+probeSig9_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 11
+probeSig11_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig11_med$coef = fit_med$coefficients[probeSig11_med$cpg,i]
+probeSig11_med$p = fit_med$p.value[probeSig11_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig11_med$p_bonf = p_bonf_i[probeSig11_med$cpg,'p_bonf']
+probeSig11_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 12
+probeSig12_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig12_med$coef = fit_med$coefficients[probeSig12_med$cpg,i]
+probeSig12_med$p = fit_med$p.value[probeSig12_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig12_med$p_bonf = p_bonf_i[probeSig12_med$cpg,'p_bonf']
+probeSig12_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 14
+probeSig14_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig14_med$coef = fit_med$coefficients[probeSig14_med$cpg,i]
+probeSig14_med$p = fit_med$p.value[probeSig14_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig14_med$p_bonf = p_bonf_i[probeSig14_med$cpg,'p_bonf']
+probeSig14_med$comp = colnames(results_globalBonf_med)[i]
+
+i = 15
+probeSig15_med = data.frame(cpg = rownames(results_globalBonf_med)[results_globalBonf_med[,i] != 0])
+probeSig15_med$coef = fit_med$coefficients[probeSig15_med$cpg,i]
+probeSig15_med$p = fit_med$p.value[probeSig15_med$cpg,i]
+p_bonf_i = p_bonf_med[p_bonf_med$comp == colnames(results_globalBonf_med)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig15_med$p_bonf = p_bonf_i[probeSig15_med$cpg,'p_bonf']
+probeSig15_med$comp = colnames(results_globalBonf_med)[i]
+
+# combine
+probeSig_med = rbind(probeSig1_med, probeSig5_med, probeSig6_med, probeSig7_med, probeSig8_med, probeSig9_med, probeSig11_med, probeSig12_med, probeSig14_med, probeSig15_med)
+colnames(probeSig_med)[1] = 'Name'
+
+probeSig_med = probeSig_med %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = c('Name'))
+
+# effect estimates in Beta value scale
+probeSig_med$deltaB = NA
+for (i in 1:nrow(probeSig_med)){
+  probeSig_med$deltaB[i] = deltaBeta(probeSig_med$Name[i], probeSig_med$comp[i], fit_med, mvals.ComBat)
+}
+
+probeSig_med = probeSig_med[order(probeSig_med$chr, probeSig_med$pos),]
+
+# compare to results of main analysis
+dim(probeSig_med)[1]
+# 76
+length(unique(probeSig_med$Name))
+# 43
+
+dim(probeSig[probeSig$bonf_sig == 1,])[1]
+# 84
+length(unique(probeSig[probeSig$bonf_sig == 1,]$Name))
+# 45
+
+sum(unique(probeSig_med$Name) %in% unique(probeSig[probeSig$bonf_sig == 1,]$Name))
+# 39
+```
+
+
+### Associaitons with cluster after Winsorizing DNAm data: Supplemental Table S9
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+mvals.ComBat_win = mvals.ComBat
+for (i in 1:nrow(mvals.ComBat_win)){
+  mvals.ComBat_win[i,] = Winsorize(mvals.ComBat_win[i,])
+}
+
+# check alignment
+all(colnames(mvals.ComBat_win) == samp_bmiEdu$Basename)
+# TRUE
+identical(colnames(mvals.ComBat_win), samp_bmiEdu$Basename)
+# TRUE
+
+design  = model.matrix(~ 0 + clust + sine_ns_12y + cosine_ns_12y + RC10_1 + RC10_2 + RC10_3 + RC10_4  + RC10_5 + RC10_6 + RC10_7 + RC10_8 + RC10_9 + RC10_10 + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo, data=samp_bmiEdu)
+fit = lmFit(mvals.ComBat_win, design, method = 'robust', maxit = 50)
+
+# all pair-wise comparisons between clusters 
+# see discussion at https://support.bioconductor.org/p/133263/ and https://support.bioconductor.org/p/65253/
+contrast.matrix <- makeContrasts(clust1-clust2, clust1-clust3, clust1-clust4, clust1-clust5, clust1-clust6, clust2-clust3, clust2-clust4, clust2-clust5, clust2-clust6, clust3-clust4, clust3-clust5, clust3-clust6, clust4-clust5, clust4-clust6, clust5-clust6, levels=design)
+fit_win <- contrasts.fit(fit, contrast.matrix)
+fit_win <- eBayes(fit_win)
+# results_hierBonf <- decideTests(fit2, adjust.method = 'bonferroni', method="hierarchical")
+# results_hierHolm <- decideTests(fit2, adjust.method = 'holm', method="hierarchical")
+# results_nestHolm <- decideTests(fit2, adjust.method = 'holm', method="nestedF")
+results_globalBonf_win <- decideTests(fit_win, adjust.method = 'bonferroni', method="global")
+results_globalFDR_win <- decideTests(fit_win, adjust.method = 'fdr', method="global")
+
+save(results_globalBonf_win, results_globalFDR_win, fit_win, file = "EWAS_global_Bonf_FDR_results_winsorizedMvals.rdata")
+```
+
+```{r, warning=FALSE, message=FALSE}
+summary(results_globalBonf_win)
+```
+
+#### Get effect estimates for probes signficant using global method with Bonferroni and adjustment
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# Bonferroni-adjusted p-values
+p_bonf_win = p.adjust(c(fit_win$p.value[,1], fit_win$p.value[,2], fit_win$p.value[,3], fit_win$p.value[,4], fit_win$p.value[,5],
+                    fit_win$p.value[,6], fit_win$p.value[,7], fit_win$p.value[,8], fit_win$p.value[,9], 
+                    fit_win$p.value[,10], fit_win$p.value[,11], fit_win$p.value[,12], 
+                    fit_win$p.value[,13], fit_win$p.value[,14], fit_win$p.value[,15]), method = 'bonferroni')
+coef_win = c(fit_win$coefficients[,1], fit_win$coefficients[,2], fit_win$coefficients[,3], fit_win$coefficients[,4], fit_win$coefficients[,5],
+                    fit_win$coefficients[,6], fit_win$coefficients[,7], fit_win$coefficients[,8], fit_win$coefficients[,9], 
+                    fit_win$coefficients[,10], fit_win$coefficients[,11], fit_win$coefficients[,12], 
+                    fit_win$coefficients[,13], fit_win$coefficients[,14], fit_win$coefficients[,15])
+p_win = c(fit_win$p.value[,1], fit_win$p.value[,2], fit_win$p.value[,3], fit_win$p.value[,4], fit_win$p.value[,5],
+                    fit_win$p.value[,6], fit_win$p.value[,7], fit_win$p.value[,8], fit_win$p.value[,9], 
+                    fit_win$p.value[,10], fit_win$p.value[,11], fit_win$p.value[,12], 
+                    fit_win$p.value[,13], fit_win$p.value[,14], fit_win$p.value[,15])
+p_bonf_win = data.frame(cpg = rep(rownames(fit_win$coefficients), times = 15), comp = rep(colnames(fit_win$coefficients), each = nrow(fit_win$coefficients)), p = p_win, p_bonf = p_bonf_win, coef = coef_win)
+
+i = 1
+probeSig1_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig1_win$coef = fit_win$coefficients[probeSig1_win$cpg,i]
+probeSig1_win$p = fit_win$p.value[probeSig1_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig1_win$p_bonf = p_bonf_i[probeSig1_win$cpg,'p_bonf']
+probeSig1_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 5
+probeSig5_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig5_win$coef = fit_win$coefficients[probeSig5_win$cpg,i]
+probeSig5_win$p = fit_win$p.value[probeSig5_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig5_win$p_bonf = p_bonf_i[probeSig5_win$cpg,'p_bonf']
+probeSig5_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 6
+probeSig6_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig6_win$coef = fit_win$coefficients[probeSig6_win$cpg,i]
+probeSig6_win$p = fit_win$p.value[probeSig6_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig6_win$p_bonf = p_bonf_i[probeSig6_win$cpg,'p_bonf']
+probeSig6_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 7
+probeSig7_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig7_win$coef = fit_win$coefficients[probeSig7_win$cpg,i]
+probeSig7_win$p = fit_win$p.value[probeSig7_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig7_win$p_bonf = p_bonf_i[probeSig7_win$cpg,'p_bonf']
+probeSig7_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 8
+probeSig8_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig8_win$coef = fit_win$coefficients[probeSig8_win$cpg,i]
+probeSig8_win$p = fit_win$p.value[probeSig8_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig8_win$p_bonf = p_bonf_i[probeSig8_win$cpg,'p_bonf']
+probeSig8_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 9
+probeSig9_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig9_win$coef = fit_win$coefficients[probeSig9_win$cpg,i]
+probeSig9_win$p = fit_win$p.value[probeSig9_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig9_win$p_bonf = p_bonf_i[probeSig9_win$cpg,'p_bonf']
+probeSig9_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 11
+probeSig11_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig11_win$coef = fit_win$coefficients[probeSig11_win$cpg,i]
+probeSig11_win$p = fit_win$p.value[probeSig11_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig11_win$p_bonf = p_bonf_i[probeSig11_win$cpg,'p_bonf']
+probeSig11_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 12
+probeSig12_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig12_win$coef = fit_win$coefficients[probeSig12_win$cpg,i]
+probeSig12_win$p = fit_win$p.value[probeSig12_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig12_win$p_bonf = p_bonf_i[probeSig12_win$cpg,'p_bonf']
+probeSig12_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 14
+probeSig14_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig14_win$coef = fit_win$coefficients[probeSig14_win$cpg,i]
+probeSig14_win$p = fit_win$p.value[probeSig14_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig14_win$p_bonf = p_bonf_i[probeSig14_win$cpg,'p_bonf']
+probeSig14_win$comp = colnames(results_globalBonf_win)[i]
+
+i = 15
+probeSig15_win = data.frame(cpg = rownames(results_globalBonf_win)[results_globalBonf_win[,i] != 0])
+probeSig15_win$coef = fit_win$coefficients[probeSig15_win$cpg,i]
+probeSig15_win$p = fit_win$p.value[probeSig15_win$cpg,i]
+p_bonf_i = p_bonf_win[p_bonf_win$comp == colnames(results_globalBonf_win)[i],]
+rownames(p_bonf_i) = p_bonf_i$cpg
+probeSig15_win$p_bonf = p_bonf_i[probeSig15_win$cpg,'p_bonf']
+probeSig15_win$comp = colnames(results_globalBonf_win)[i]
+
+# combine
+probeSig_win = rbind(probeSig1_win, probeSig5_win, probeSig6_win, probeSig7_win, probeSig8_win, probeSig9_win, probeSig11_win, probeSig12_win, probeSig14_win, probeSig15_win)
+colnames(probeSig_win)[1] = 'Name'
+
+probeSig_win = probeSig_win %>% left_join(anno[,c('Name', 'chr', 'pos', 'UCSC_RefGene_Name')], by = c('Name'))
+
+# effect estimates in Beta value scale
+probeSig_win$deltaB = NA
+for (i in 1:nrow(probeSig_win)){
+  probeSig_win$deltaB[i] = deltaBeta(probeSig_win$Name[i], probeSig_win$comp[i], fit_med, mvals.ComBat)
+}
+
+probeSig_win = probeSig_win[order(probeSig_win$chr, probeSig_win$pos),]
+
+# compare to results of main analysis
+dim(probeSig_win)[1]
+# 62
+length(unique(probeSig_win$Name))
+# 34
+
+dim(probeSig[probeSig$bonf_sig == 1,])[1]
+# 84
+length(unique(probeSig[probeSig$bonf_sig == 1,]$Name))
+# 45
+
+sum(unique(probeSig_win$Name) %in% unique(probeSig[probeSig$bonf_sig == 1,]$Name))
+# 26
+
+unique(probeSig_win$Name)[!(unique(probeSig_win$Name) %in% unique(probeSig[probeSig$bonf_sig == 1,]$Name))]
+# "cg06861375" "cg10101468" "cg08103551" "cg11582017" "cg20823662" "cg03821543" "cg26161148" "cg17368874"
+```
+
+
+## ANCOM-BC
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+# combine taxa
+ps4_mean_glom = tax_glom(ps4_noncontam_10k_ge10reads, 'genus')
+dim(get_sample(ps4_mean_glom))
+# 426 416
+
+# filter for participants with complete data
+filter = ifelse(get_variable(ps4_mean_glom)$Sample_ID %in% samp_bmiEdu$Sample_ID, TRUE, FALSE)
+ps4_mean_glom = prune_samples(filter, ps4_mean_glom)
+dim(get_sample(ps4_mean_glom))
+# 426 372  -> 426 taxa
+
+# add variables to metadata
+# covariates
+all(get_variable(ps4_mean_glom)$Sample_ID == samp_bmiEdu$Sample_ID)
+identical(get_variable(ps4_mean_glom)$Sample_ID, samp_bmiEdu$Sample_ID)
+rownames(samp_bmiEdu) = samp_bmiEdu$Sample_ID
+ps4_mean_glom = ps_join(ps4_mean_glom, samp_bmiEdu[,c('Sample_ID', "AgeAccelerationResidual_nasal", "AgeAccelerationResidualHannum_nasal", "AgeAccelPheno_nasal", "DNAmAgeSkinBloodClockAdjAge_nasal", 
+  "AgeAccelGrim_nasal", "DNAmTLAdjAge_nasal", "IEAA_nasal", "EEAA_nasal", 'sine_ns_12y', 'cosine_ns_12y', 'RC10_1', 'RC10_2', 'RC10_3', 'RC10_4', 'RC10_5',
+  'RC10_6', 'RC10_7', 'RC10_8', 'RC10_9', 'RC10_10', 'female_d', 'Age_nasal', 're_teenc', 'bmiz_cdc_ET', 'coll_grad', 'runNo')], by = 'Sample_ID')
+head(sample_data(ps4_mean_glom))
+
+# get Bonferroni significant probes
+probes = unique(probeSig$Name[probeSig$bonf_sig == 1])
+length(probes)
+# 45
+
+# M values
+mvals_sig = mvals.ComBat[probes,]
+mvals_sig = t(mvals_sig)
+mvals_sig = data.frame(mvals_sig)
+all(rownames(mvals_sig) == samp_bmiEdu$Basename)
+identical(rownames(mvals_sig), samp_bmiEdu$Basename)
+all(get_variable(ps4_mean_glom)$Sample_ID == samp_bmiEdu$Sample_ID)
+identical(get_variable(ps4_mean_glom)$Sample_ID, samp_bmiEdu$Sample_ID)
+mvals_sig$Sample_ID = samp_bmiEdu$Sample_ID
+ps4_mean_glom = ps_join(ps4_mean_glom, mvals_sig, by = 'Sample_ID')
+head(sample_data(ps4_mean_glom))
+
+# ANCOM-BC on M-values
+for(i in 1:length(probes)){
+  print(i)
+  set.seed(123)
+  #Run ANCOM-BC
+  output = ancombc2(data = ps4_mean_glom,
+                  tax_level = "genus",
+                  fix_formula = paste0(probes[i], '+ sine_ns_12y + cosine_ns_12y + RC10_1 + RC10_2 + RC10_3 + RC10_4 + RC10_5 + RC10_6 + RC10_7 + RC10_8 + RC10_9 + RC10_10 + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo.y'),
+                  p_adj_method = "fdr", prv_cut = 0.15)
+res_prim = output$res
+df_res = res_prim %>%
+  dplyr::select(taxon, ends_with(probes[i]))
+df_res$cpg = probes[i]
+colnames(df_res) = c('taxon', 'lfc', 'se', 'W', 'p', 'q', 'diff', 'sens', 'cpg')
+assign(paste0('df_', probes[i]), df_res)
+rm(output, res_prim, df_res)
+}
+
+# combine
+df_ancom_all = rbind(df_cg00624878, df_cg00820581, df_cg01025283, df_cg01074955, df_cg01392841, df_cg02701084, df_cg04202853, df_cg04229722, df_cg04892170,            
+  df_cg05256656, df_cg05483076, df_cg05579187, df_cg05629953, df_cg06431905, df_cg07850967, df_cg08197824, df_cg11510557, df_cg12221475,
+  df_cg12665973, df_cg13474619, df_cg13801271, df_cg14815005, df_cg15346917, df_cg15620146, df_cg15641348, df_cg15700020, df_cg16424683,
+  df_cg16728516, df_cg16797691, df_cg18104979, df_cg18238734, df_cg18567954, df_cg19084794, df_cg19145592, df_cg19254532, df_cg19385711,
+  df_cg19423735, df_cg19565299, df_cg20659435, df_cg22676654, df_cg23456396, df_cg23699748, df_cg23957800, df_cg24592462, df_cg26791489)
+df_ancom_all = df_ancom_all[order(df_ancom_all$taxon),]
+df_ancom_all = df_ancom_all[order(df_ancom_all$cpg),]
+
+table(df_ancom_all$q<0.05)
+# FALSE  TRUE 
+#  1717    38 
+table(df_ancom_all$q<0.05 & df_ancom_all$sens)
+# FALSE  TRUE 
+#  1734    21 
+
+dim(table(df_ancom_all$taxon))
+# 39
+
+# add IQR of M-values
+df_ancom_all$iqr = NA
+for (i in 1:nrow(df_ancom_all)){
+  df_ancom_all$iqr[i] = IQR(mvals.ComBat[df_ancom_all$cpg[i],])
+}
+df_ancom_all$logFCperIQR = df_ancom_all$lfc * df_ancom_all$iqr
+
+write.csv(df_ancom_all, "df_ancom_all_prv_cut15.csv")
+
+
+# FDR significant associations and plotting: Table 3, Table S4
+df_ancom_all_sig = df_ancom_all[df_ancom_all$diff,]
+# add IQR of M-values
+df_ancom_all_sig$iqr = NA
+for (i in 1:nrow(df_ancom_all_sig)){
+  df_ancom_all_sig$iqr[i] = IQR(mvals.ComBat[df_ancom_all_sig$cpg[i],])
+}
+df_ancom_all_sig$logFCperIQR = df_ancom_all_sig$lfc * df_ancom_all_sig$iqr
+```
+
+
+## Assocations with epigenetic age acceleration
+### Cluster associations
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+cor.test(samp_bmiEdu$Age_nasal, samp_bmiEdu$DNAmAge_nasal)
+# t = 3.6934, df = 370, p-value = 0.0002547
+#      cor 
+# 0.188564 
+
+mdae(samp_bmiEdu$Age_nasal, samp_bmiEdu$DNAmAge_nasal)
+# 3.545544
+
+fit_Horvath = lm(AgeAccelerationResidual_nasal ~ clust + sine_ns_12y + cosine_ns_12y + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo, data = samp_bmiEdu)
+emm_Horvath = emmeans(fit_Horvath, "clust")
+pairs(emm_Horvath)
+# contrast        estimate    SE  df t.ratio p.value
+#  clust1 - clust2  -0.3052 0.282 353  -1.083  0.8880
+#  clust1 - clust3  -0.0634 0.276 353  -0.229  0.9999
+#  clust1 - clust4  -0.1981 0.350 353  -0.566  0.9931
+#  clust1 - clust5  -0.3319 0.372 353  -0.892  0.9482
+#  clust1 - clust6  -0.8110 0.520 353  -1.559  0.6262
+#  clust2 - clust3   0.2418 0.317 353   0.763  0.9734
+#  clust2 - clust4   0.1071 0.377 353   0.284  0.9997
+#  clust2 - clust5  -0.0266 0.398 353  -0.067  1.0000
+#  clust2 - clust6  -0.5057 0.534 353  -0.947  0.9339
+#  clust3 - clust4  -0.1347 0.380 353  -0.355  0.9993
+#  clust3 - clust5  -0.2685 0.397 353  -0.676  0.9845
+#  clust3 - clust6  -0.7476 0.541 353  -1.382  0.7379
+#  clust4 - clust5  -0.1338 0.443 353  -0.302  0.9997
+#  clust4 - clust6  -0.6128 0.564 353  -1.086  0.8868
+#  clust5 - clust6  -0.4791 0.580 353  -0.826  0.9626
+```
+
+### Associations with abundance - ANCOM-BC2: Supplemental Table S7
+```{r, warning=FALSE, message=FALSE, eval=FALSE}
+ea_vars = c("AgeAccelerationResidual_nasal", "AgeAccelerationResidualHannum_nasal", "AgeAccelPheno_nasal", "DNAmAgeSkinBloodClockAdjAge_nasal", 
+  "AgeAccelGrim_nasal", "DNAmTLAdjAge_nasal", "IEAA_nasal", "EEAA_nasal")
+for(i in 1:length(ea_vars)){
+  print(i)
+  set.seed(123)
+  #Run ANCOM-BC
+  output = ancombc2(data = ps4_mean_glom,
+                  tax_level = "genus",
+                  fix_formula = paste0(ea_vars[i], '+ sine_ns_12y + cosine_ns_12y + female_d + Age_nasal + re_teenc + bmiz_cdc_ET + coll_grad + runNo.y'),
+                  p_adj_method = "fdr", prv_cut = 0.15)
+res_prim = output$res
+df_res = res_prim %>%
+  dplyr::select(taxon, ends_with(ea_vars[i]))
+df_res$cpg = ea_vars[i]
+colnames(df_res) = c('taxon', 'lfc', 'se', 'W', 'p', 'q', 'diff', 'sens', 'cpg')
+assign(paste0('df_', ea_vars[i]), df_res)
+rm(output, res_prim, df_res)
+}
+
+# combine
+df_ancom_all_EA = rbind(df_AgeAccelerationResidual_nasal, df_AgeAccelerationResidualHannum_nasal, df_AgeAccelPheno_nasal, 
+df_DNAmAgeSkinBloodClockAdjAge_nasal, df_AgeAccelGrim_nasal, df_DNAmTLAdjAge_nasal, df_IEAA_nasal, df_EEAA_nasal)
+df_ancom_all_EA = df_ancom_all_EA[order(df_ancom_all_EA$taxon),]
+df_ancom_all_EA = df_ancom_all_EA[order(df_ancom_all_EA$cpg),]
+
+table(df_ancom_all_EA$q<0.05)
+# FALSE  TRUE 
+ #  251    61
+table(df_ancom_all_EA$q<0.05 & df_ancom_all_EA$sens)
+# FALSE  TRUE 
+#   310     2
+
+df_ancom_all_EA[df_ancom_all_EA$q<0.05 & df_ancom_all_EA$sens,]
+#               taxon        lfc        se         W           p          q diff sens                               cpg
+# 4   Corynebacterium -0.1368865 0.0537506 -2.546698 0.011296278 0.04550145 TRUE TRUE     AgeAccelerationResidual_nasal
+# 128       Moraxella  0.1657696 0.0593984  2.790809 0.005960717 0.01937233 TRUE TRUE DNAmAgeSkinBloodClockAdjAge_nasal
+
+write.csv(df_ancom_all_EA, "Horvath_results.csv")
+```
